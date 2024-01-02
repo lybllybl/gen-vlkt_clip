@@ -15,6 +15,7 @@ from .backbone import build_backbone
 from .matcher import build_matcher
 from .gen import build_gen, build_i_decoder
 from .position_encoding import PositionEmbeddingSine
+from .gen import FeedForwardNetwork, GroupWiseLinear
 
 
 def _sigmoid(x):
@@ -42,15 +43,17 @@ class GEN_VLKT(nn.Module):
         self.dec_layers = self.args.dec_layers
 
         i_hidden_dim = args.i_hidden_dim
+        hoi_num = len(hico_text_label) if self.args.dataset_file == 'hico' else len(vcoco_hoi_text_label)
         if args.feat_from == 'encoder':
             self.i_feat_proj = nn.Conv2d(hidden_dim, i_hidden_dim, kernel_size=1)
         elif args.feat_from == 'backbone':
             self.i_feat_proj = nn.Conv2d(2048, i_hidden_dim, kernel_size=1)
-        if self.args.dataset_file == 'hico':
-            self.i_query_embed = nn.Embedding(len(hico_text_label), i_hidden_dim)
-        elif self.args.dataset_file == 'vcoco':
-            self.i_query_embed = nn.Embedding(len(vcoco_hoi_text_label), i_hidden_dim)
+        self.i_query_embed = nn.Embedding(hoi_num, i_hidden_dim)
         self.i_logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
+        self.i_hoi_proj = nn.Sequential(
+            FeedForwardNetwork(i_hidden_dim, args.dim_feedforward, args.dropout),
+            GroupWiseLinear(hoi_num, i_hidden_dim, bias=True),
+        )
 
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
         self.obj_logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
@@ -160,7 +163,7 @@ class GEN_VLKT(nn.Module):
         i_memory = self.i_feat_proj(i_memory)
         i_pos = PositionEmbeddingSine(self.args.i_hidden_dim // 2, normalize=True)(NestedTensor(i_memory, mask))
         i_hs = self.i_decoder(i_memory, mask, self.hoi_clip_label, self.i_query_embed.weight, i_pos)
-
+        i_hoi_class = self.i_hoi_proj(i_hs).squeeze(-1)
 
         # if self.args.with_clip_label:
         #     logit_scale = self.logit_scale.exp()
@@ -178,8 +181,10 @@ class GEN_VLKT(nn.Module):
         #     outputs_hoi_class = self.hoi_class_embedding(inter_hs)
         inter_hs = self.hoi_class_fc(inter_hs)
         outputs_inter_hs = inter_hs.clone()
-        logit_scale = self.i_logit_scale.exp()
-        outputs_hoi_class = logit_scale * torch.matmul(inter_hs, i_hs.transpose(-2, -1))
+        inter_hoi_class = self.hoi_class_embedding(inter_hs)
+
+        outputs_hoi_class = inter_hoi_class + i_hoi_class.unsqueeze(-2)
+        outputs_hoi_class = outputs_hoi_class / outputs_hoi_class.norm(dim=-1, keepdim=True)
 
         out = {'pred_hoi_logits': outputs_hoi_class[-1], 'pred_obj_logits': outputs_obj_class[-1],
                'pred_sub_boxes': outputs_sub_coord[-1], 'pred_obj_boxes': outputs_obj_coord[-1]}

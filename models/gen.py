@@ -4,6 +4,7 @@ from typing import Optional, List
 import torch
 import torch.nn.functional as F
 from torch import nn, Tensor
+import math
 
 
 class InteractionDecoder(nn.Module):
@@ -332,6 +333,54 @@ class TransformerDecoderLayer(nn.Module):
                                     tgt_key_padding_mask, memory_key_padding_mask, pos, query_pos)
         return self.forward_post(tgt, memory, tgt_mask, memory_mask,
                                  tgt_key_padding_mask, memory_key_padding_mask, pos, query_pos)
+
+
+class FeedForwardNetwork(nn.Module):
+    def __init__(self, d_model, dim_feedforward, dropout, activation="relu"):
+        super().__init__()
+        self.linear1 = nn.Linear(d_model, dim_feedforward)
+        self.activation = _get_activation_fn(activation)
+        self.dropout1 = nn.Dropout(dropout)
+        self.linear2 = nn.Linear(dim_feedforward, d_model)
+        self.dropout2 = nn.Dropout(dropout)
+        self.norm = nn.LayerNorm(d_model)
+
+    def forward(self, tgt):
+        tgt2 = self.linear2(self.dropout1(self.activation(self.linear1(tgt))))
+        tgt = tgt + self.dropout2(tgt2)
+        tgt = self.norm(tgt)
+        return tgt
+
+
+class GroupWiseLinear(nn.Module):
+    # could be changed to:
+    # output = torch.einsum('ijk,zjk->ij', x, self.W)
+    # or output = torch.einsum('ijk,jk->ij', x, self.W[0])
+    def __init__(self, num_class, hidden_dim, bias=True):
+        super().__init__()
+        self.num_class = num_class
+        self.hidden_dim = hidden_dim
+        self.bias = bias
+
+        self.W = nn.Parameter(torch.Tensor(1, num_class, hidden_dim))
+        if bias:
+            self.b = nn.Parameter(torch.Tensor(1, num_class))
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        stdv = 1. / math.sqrt(self.W.size(2))
+        for i in range(self.num_class):
+            self.W[0][i].data.uniform_(-stdv, stdv)
+        if self.bias:
+            for i in range(self.num_class):
+                self.b[0][i].data.uniform_(-stdv, stdv)
+
+    def forward(self, x):
+        # x: B,K,d
+        x = (self.W * x).sum(-1)
+        if self.bias:
+            x = x + self.b
+        return x.unsqueeze(-1)
 
 
 def _get_clones(module, N):
