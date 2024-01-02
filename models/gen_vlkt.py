@@ -13,7 +13,8 @@ from datasets.vcoco_text_label import vcoco_hoi_text_label, vcoco_obj_text_label
 
 from .backbone import build_backbone
 from .matcher import build_matcher
-from .gen import build_gen
+from .gen import build_gen, build_i_decoder
+from .position_encoding import PositionEmbeddingSine
 
 
 def _sigmoid(x):
@@ -22,12 +23,13 @@ def _sigmoid(x):
 
 
 class GEN_VLKT(nn.Module):
-    def __init__(self, backbone, transformer, num_queries, aux_loss=False, args=None):
+    def __init__(self, backbone, transformer, i_decoder, num_queries, aux_loss=False, args=None):
         super().__init__()
 
         self.args = args
         self.num_queries = num_queries
         self.transformer = transformer
+        self.i_decoder = i_decoder
         hidden_dim = transformer.d_model
         self.query_embed_h = nn.Embedding(num_queries, hidden_dim)
         self.query_embed_o = nn.Embedding(num_queries, hidden_dim)
@@ -38,6 +40,17 @@ class GEN_VLKT(nn.Module):
         self.backbone = backbone
         self.aux_loss = aux_loss
         self.dec_layers = self.args.dec_layers
+
+        i_hidden_dim = args.i_hidden_dim
+        if args.feat_from == 'encoder':
+            self.i_feat_proj = nn.Conv2d(hidden_dim, i_hidden_dim, kernel_size=1)
+        elif args.feat_from == 'backbone':
+            self.i_feat_proj = nn.Conv2d(2048, i_hidden_dim, kernel_size=1)
+        if self.args.dataset_file == 'hico':
+            self.i_query_embed = nn.Embedding(len(hico_text_label), i_hidden_dim)
+        elif self.args.dataset_file == 'vcoco':
+            self.i_query_embed = nn.Embedding(len(vcoco_hoi_text_label), i_hidden_dim)
+        self.i_logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
 
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
         self.obj_logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
@@ -54,6 +67,7 @@ class GEN_VLKT(nn.Module):
         clip_label, obj_clip_label, v_linear_proj_weight, hoi_text, obj_text, train_clip_label = \
             self.init_classifier_with_CLIP(hoi_text_label, obj_text_label, unseen_index)
         num_obj_classes = len(obj_text) - 1  # del nothing
+        self.hoi_clip_label = clip_label
 
         self.hoi_class_fc = nn.Sequential(
             nn.Linear(hidden_dim, args.clip_embed_dim),
@@ -121,11 +135,11 @@ class GEN_VLKT(nn.Module):
 
         src, mask = features[-1].decompose()
         assert mask is not None
-        h_hs, o_hs, inter_hs = self.transformer(self.input_proj(src), mask,
+        h_hs, o_hs, inter_hs, memory = self.transformer(self.input_proj(src), mask,
                                                 self.query_embed_h.weight,
                                                 self.query_embed_o.weight,
                                                 self.pos_guided_embedd.weight,
-                                                pos[-1])[:3]
+                                                pos[-1])
 
         outputs_sub_coord = self.hum_bbox_embed(h_hs).sigmoid()
         outputs_obj_coord = self.obj_bbox_embed(o_hs).sigmoid()
@@ -138,20 +152,34 @@ class GEN_VLKT(nn.Module):
         else:
             outputs_obj_class = self.obj_class_embed(o_hs)
 
-        if self.args.with_clip_label:
-            logit_scale = self.logit_scale.exp()
-            inter_hs = self.hoi_class_fc(inter_hs)
-            outputs_inter_hs = inter_hs.clone()
-            inter_hs = inter_hs / inter_hs.norm(dim=-1, keepdim=True)
-            if self.args.dataset_file == 'hico' and self.args.zero_shot_type != 'default' \
-                    and (self.args.eval or not is_training):
-                outputs_hoi_class = logit_scale * self.eval_visual_projection(inter_hs)
-            else:
-                outputs_hoi_class = logit_scale * self.visual_projection(inter_hs)
-        else:
-            inter_hs = self.hoi_class_fc(inter_hs)
-            outputs_inter_hs = inter_hs.clone()
-            outputs_hoi_class = self.hoi_class_embedding(inter_hs)
+        i_memory = None
+        if self.args.feat_from == 'encoder':
+            i_memory = memory
+        elif self.args.feat_from == 'backbone':
+            i_memory = src
+        i_memory = self.i_feat_proj(i_memory)
+        i_pos = PositionEmbeddingSine(self.args.i_hidden_dim // 2, normalize=True)(NestedTensor(i_memory, mask))
+        i_hs = self.i_decoder(i_memory, mask, self.hoi_clip_label, self.i_query_embed.weight, i_pos)
+
+
+        # if self.args.with_clip_label:
+        #     logit_scale = self.logit_scale.exp()
+        #     inter_hs = self.hoi_class_fc(inter_hs)
+        #     outputs_inter_hs = inter_hs.clone()
+        #     inter_hs = inter_hs / inter_hs.norm(dim=-1, keepdim=True)
+        #     if self.args.dataset_file == 'hico' and self.args.zero_shot_type != 'default' \
+        #             and (self.args.eval or not is_training):
+        #         outputs_hoi_class = logit_scale * self.eval_visual_projection(inter_hs)
+        #     else:
+        #         outputs_hoi_class = logit_scale * self.visual_projection(inter_hs)
+        # else:
+        #     inter_hs = self.hoi_class_fc(inter_hs)
+        #     outputs_inter_hs = inter_hs.clone()
+        #     outputs_hoi_class = self.hoi_class_embedding(inter_hs)
+        inter_hs = self.hoi_class_fc(inter_hs)
+        outputs_inter_hs = inter_hs.clone()
+        logit_scale = self.i_logit_scale.exp()
+        outputs_hoi_class = logit_scale * torch.matmul(inter_hs, i_hs.transpose(-2, -1))
 
         out = {'pred_hoi_logits': outputs_hoi_class[-1], 'pred_obj_logits': outputs_obj_class[-1],
                'pred_sub_boxes': outputs_sub_coord[-1], 'pred_obj_boxes': outputs_obj_coord[-1]}
@@ -466,9 +494,12 @@ def build(args):
 
     gen = build_gen(args)
 
+    i_decoder = build_i_decoder(args)
+
     model = GEN_VLKT(
         backbone,
         gen,
+        i_decoder,
         num_queries=args.num_queries,
         aux_loss=args.aux_loss,
         args=args

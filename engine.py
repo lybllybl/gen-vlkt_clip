@@ -27,7 +27,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
     else:
         metric_logger.add_meter('obj_class_error', utils.SmoothedValue(window_size=1, fmt='{value:.2f}'))
     header = 'Epoch: [{}]'.format(epoch)
-    print_freq = 10
+    print_freq = int(len(data_loader)/5)
 
     for samples, targets in metric_logger.log_every(data_loader, print_freq, header):
         samples = samples.to(device)
@@ -88,7 +88,8 @@ def evaluate_hoi(dataset_file, model, postprocessors, data_loader,
     gts = []
     indices = []
     counter = 0
-    for samples, targets in metric_logger.log_every(data_loader, 10, header):
+    print_freq = int(len(data_loader) / 5)
+    for samples, targets in metric_logger.log_every(data_loader, print_freq, header):
         samples = samples.to(device)
         # print(targets)
         outputs = model(samples, is_training=False)

@@ -6,6 +6,46 @@ import torch.nn.functional as F
 from torch import nn, Tensor
 
 
+class InteractionDecoder(nn.Module):
+
+    def __init__(self, d_model=512, nhead=8,
+                 num_decoder_layers=6, dim_feedforward=2048, dropout=0.1,
+                 activation="relu", normalize_before=False,
+                 cross_attn_first=False,
+                 return_intermediate_dec=False):
+        super().__init__()
+
+        decoder_layer = TransformerDecoderLayer(d_model, nhead, dim_feedforward, dropout, activation, normalize_before)
+        decoder_norm = nn.LayerNorm(d_model)
+        self.decoder = TransformerDecoder(decoder_layer, num_decoder_layers, decoder_norm,
+                                          return_intermediate=return_intermediate_dec)
+
+        self._reset_parameters()
+
+        self.d_model = d_model
+        self.nhead = nhead
+        self.num_decoder_layers = num_decoder_layers
+
+    def _reset_parameters(self):
+        for p in self.parameters():
+            if p.dim() > 1:
+                nn.init.xavier_uniform_(p)
+
+    def forward(self, src, mask, tgt, query_embed, pos_embed):
+        # flatten NxCxHxW to HWxNxC
+        bs, c, h, w = src.shape
+        src = src.flatten(2).permute(2, 0, 1)
+        pos_embed = pos_embed.flatten(2).permute(2, 0, 1)
+        query_embed = query_embed.unsqueeze(1).repeat(1, bs, 1)
+        mask = mask.flatten(1)
+
+        # tgt = torch.zeros_like(query_embed)
+        tgt = tgt.unsqueeze(1).repeat(1, bs, 1)
+        hs = self.decoder(tgt, src, memory_key_padding_mask=mask,
+                          pos=pos_embed, query_pos=query_embed)
+        return hs.transpose(1, 2)  # [n_layers, N, K, C]
+
+
 class GEN(nn.Module):
 
     def __init__(self, d_model=512, nhead=8, num_encoder_layers=6,
@@ -306,6 +346,18 @@ def build_gen(args):
         dim_feedforward=args.dim_feedforward,
         num_encoder_layers=args.enc_layers,
         num_dec_layers=args.dec_layers,
+        normalize_before=args.pre_norm,
+        return_intermediate_dec=True,
+    )
+
+
+def build_i_decoder(args):
+    return InteractionDecoder(
+        d_model=args.i_hidden_dim,
+        dropout=args.dropout,
+        nhead=args.nheads,
+        dim_feedforward=args.dim_feedforward,
+        num_decoder_layers=args.i_dec_layers,
         normalize_before=args.pre_norm,
         return_intermediate_dec=True,
     )

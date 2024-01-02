@@ -56,6 +56,13 @@ def get_args_parser():
     parser.add_argument('--num_queries', default=100, type=int,
                         help="Number of query slots")
     parser.add_argument('--pre_norm', action='store_true')
+    # interaction_decoder
+    parser.add_argument('--feat_from', default='encoder', type=str,
+                        help="the key of interaction_decoder")
+    parser.add_argument('--i_dec_layers', default=1, type=int,
+                        help="Number of decoding layers in the interaction_decoder")
+    parser.add_argument('--i_hidden_dim', default=512, type=int,
+                        help="Size of the embeddings (dimension of the interaction_decoder)")
 
     # * Segmentation
     parser.add_argument('--masks', action='store_true',
@@ -325,6 +332,15 @@ def main(args):
 
         if epoch < args.lr_drop and epoch % 5 != 0:  ## eval every 5 epoch before lr_drop
             continue
+        elif epoch == args.lr_drop:
+            checkpoint_path = os.path.join(output_dir, str(epoch) + '.pth')
+            utils.save_on_master({
+                'model': model_without_ddp.state_dict(),
+                'optimizer': optimizer.state_dict(),
+                'lr_scheduler': lr_scheduler.state_dict(),
+                'epoch': epoch,
+                'args': args,
+            }, checkpoint_path)
         elif epoch >= args.lr_drop and epoch % 2 == 0:  ## eval every 2 epoch after lr_drop
             continue
 
