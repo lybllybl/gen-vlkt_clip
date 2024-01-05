@@ -59,7 +59,7 @@ def get_args_parser():
     # interaction_decoder
     parser.add_argument('--feat_from', default='encoder', type=str,
                         help="the key of interaction_decoder")
-    parser.add_argument('--i_dec_layers', default=1, type=int,
+    parser.add_argument('--i_dec_layers', default=3, type=int,
                         help="Number of decoding layers in the interaction_decoder")
     parser.add_argument('--i_hidden_dim', default=512, type=int,
                         help="Size of the embeddings (dimension of the interaction_decoder)")
@@ -109,6 +109,7 @@ def get_args_parser():
     parser.add_argument('--verb_loss_coef', default=2, type=float)
     parser.add_argument('--hoi_loss_coef', default=2, type=float)
     parser.add_argument('--mimic_loss_coef', default=20, type=float)
+    parser.add_argument('--image_hoi_loss_coef', default=1, type=float)
     parser.add_argument('--alpha', default=0.5, type=float, help='focal loss alpha')
     parser.add_argument('--eos_coef', default=0.1, type=float,
                         help="Relative classification weight of the no-object class")

@@ -160,12 +160,14 @@ class HICODetection(torch.utils.data.Dataset):
                 target['obj_labels'] = torch.zeros((0,), dtype=torch.int64)
                 target['verb_labels'] = torch.zeros((0, len(self._valid_verb_ids)), dtype=torch.float32)
                 target['hoi_labels'] = torch.zeros((0, len(self.text_label_ids)), dtype=torch.float32)
+                target['image_hoi_labels'] = torch.zeros((len(self.text_label_ids)), dtype=torch.float32)
                 target['sub_boxes'] = torch.zeros((0, 4), dtype=torch.float32)
                 target['obj_boxes'] = torch.zeros((0, 4), dtype=torch.float32)
             else:
                 target['obj_labels'] = torch.stack(obj_labels)
                 target['verb_labels'] = torch.as_tensor(verb_labels, dtype=torch.float32)
                 target['hoi_labels'] = torch.as_tensor(hoi_labels, dtype=torch.float32)
+                target['image_hoi_labels'] = target['hoi_labels'].clone().sum(0).to(torch.bool).to(torch.float32)
                 target['sub_boxes'] = torch.stack(sub_boxes)
                 target['obj_boxes'] = torch.stack(obj_boxes)
         else:

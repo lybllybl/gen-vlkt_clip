@@ -48,6 +48,7 @@ class GEN_VLKT(nn.Module):
             self.i_feat_proj = nn.Conv2d(hidden_dim, i_hidden_dim, kernel_size=1)
         elif args.feat_from == 'backbone':
             self.i_feat_proj = nn.Conv2d(2048, i_hidden_dim, kernel_size=1)
+        self.image_hoi_embed = nn.Embedding(hoi_num, i_hidden_dim)
         self.i_query_embed = nn.Embedding(hoi_num, i_hidden_dim)
         self.i_logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
         self.i_hoi_proj = nn.Sequential(
@@ -163,7 +164,9 @@ class GEN_VLKT(nn.Module):
         i_memory = self.i_feat_proj(i_memory)
         i_pos = PositionEmbeddingSine(self.args.i_hidden_dim // 2, normalize=True)(NestedTensor(i_memory, mask))
         i_hs = self.i_decoder(i_memory, mask, self.hoi_clip_label, self.i_query_embed.weight, i_pos)
-        i_hoi_class = self.i_hoi_proj(i_hs).squeeze(-1)
+        i_hs = i_hs + self.image_hoi_embed.weight
+        i_hs = i_hs / i_hs.norm(dim=-1, keepdim=True)
+        outputs_i_hoi_class = self.i_hoi_proj(i_hs).squeeze(-1)
 
         # if self.args.with_clip_label:
         #     logit_scale = self.logit_scale.exp()
@@ -183,11 +186,12 @@ class GEN_VLKT(nn.Module):
         outputs_inter_hs = inter_hs.clone()
         inter_hoi_class = self.hoi_class_embedding(inter_hs)
 
-        outputs_hoi_class = inter_hoi_class + i_hoi_class.unsqueeze(-2)
+        outputs_hoi_class = inter_hoi_class + outputs_i_hoi_class.unsqueeze(-2)
         outputs_hoi_class = outputs_hoi_class / outputs_hoi_class.norm(dim=-1, keepdim=True)
 
         out = {'pred_hoi_logits': outputs_hoi_class[-1], 'pred_obj_logits': outputs_obj_class[-1],
-               'pred_sub_boxes': outputs_sub_coord[-1], 'pred_obj_boxes': outputs_obj_coord[-1]}
+               'pred_sub_boxes': outputs_sub_coord[-1], 'pred_obj_boxes': outputs_obj_coord[-1],
+               'pred_image_hoi_logits': outputs_i_hoi_class[-1]}
 
         if self.args.with_mimic:
             out['inter_memory'] = outputs_inter_hs[-1]
@@ -199,18 +203,19 @@ class GEN_VLKT(nn.Module):
 
             out['aux_outputs'] = self._set_aux_loss_triplet(outputs_hoi_class, outputs_obj_class,
                                                             outputs_sub_coord, outputs_obj_coord,
-                                                            aux_mimic)
+                                                            outputs_i_hoi_class, aux_mimic)
 
         return out
 
     @torch.jit.unused
     def _set_aux_loss_triplet(self, outputs_hoi_class, outputs_obj_class,
-                              outputs_sub_coord, outputs_obj_coord, outputs_inter_hs=None):
+                              outputs_sub_coord, outputs_obj_coord, outputs_i_hoi_class, outputs_inter_hs=None):
 
         aux_outputs = {'pred_hoi_logits': outputs_hoi_class[-self.dec_layers: -1],
                        'pred_obj_logits': outputs_obj_class[-self.dec_layers: -1],
                        'pred_sub_boxes': outputs_sub_coord[-self.dec_layers: -1],
-                       'pred_obj_boxes': outputs_obj_coord[-self.dec_layers: -1]}
+                       'pred_obj_boxes': outputs_obj_coord[-self.dec_layers: -1],
+                       'pred_image_hoi_logits': outputs_i_hoi_class[-self.dec_layers: -1]}
         if outputs_inter_hs is not None:
             aux_outputs['inter_memory'] = outputs_inter_hs[-self.dec_layers: -1]
         outputs_auxes = []
@@ -365,6 +370,14 @@ class SetCriterionHOI(nn.Module):
         losses = {'loss_feat_mimic': loss_feat_mimic}
         return losses
 
+    def loss_image_hoi_labels(self, outputs, targets, indices, num_interactions):
+        src_logits = outputs['pred_image_hoi_logits']
+        target_labels = torch.stack([t['image_hoi_labels'] for t in targets])
+
+        src_logits = src_logits.sigmoid()
+        loss_image_verb_ce = self.asymmetric_loss(src_logits, target_labels)
+        return {'loss_image_hoi_ce': loss_image_verb_ce}
+
     def _neg_loss(self, pred, gt, weights=None, alpha=0.25):
         ''' Modified focal loss. Exactly the same as CornerNet.
           Runs faster and costs a little bit more memory
@@ -390,6 +403,49 @@ class SetCriterionHOI(nn.Module):
             loss = loss - (pos_loss + neg_loss) / num_pos
         return loss
 
+    def asymmetric_loss(self, x, y, gamma_neg=4, gamma_pos=0, clip=0.05, eps=1e-8, disable_torch_grad_focal_loss=True):
+        """"
+        Parameters
+        ----------
+        x: input logits
+        y: targets (multi-label binarized vector)
+        """
+        pos_inds = y.eq(1).float()
+        num_pos = pos_inds.float().sum()
+
+        # Calculating Probabilities
+        # x_sigmoid = torch.sigmoid(x)
+        x_sigmoid = x
+        xs_pos = x_sigmoid
+        xs_neg = 1 - x_sigmoid
+
+        # Asymmetric Clipping
+        if clip is not None and clip > 0:
+            xs_neg = (xs_neg + clip).clamp(max=1)
+
+        # Basic CE calculation
+        los_pos = y * torch.log(xs_pos.clamp(min=eps))
+        los_neg = (1 - y) * torch.log(xs_neg.clamp(min=eps))
+        loss = los_pos + los_neg
+
+        # Asymmetric Focusing
+        if gamma_neg > 0 or gamma_pos > 0:
+            if disable_torch_grad_focal_loss:
+                torch.set_grad_enabled(False)
+            pt0 = xs_pos * y
+            pt1 = xs_neg * (1 - y)  # pt = p if t > 0 else 1-p
+            pt = pt0 + pt1
+            one_sided_gamma = gamma_pos * y + gamma_neg * (1 - y)
+            one_sided_w = torch.pow(1 - pt, one_sided_gamma)
+            if disable_torch_grad_focal_loss:
+                torch.set_grad_enabled(True)
+            loss *= one_sided_w
+
+        if num_pos == 0:
+            return -loss.sum()
+        else:
+            return -loss.sum() / num_pos
+
     def _get_src_permutation_idx(self, indices):
         # permute predictions following indices
         batch_idx = torch.cat([torch.full_like(src, i) for i, (src, _) in enumerate(indices)])
@@ -402,7 +458,8 @@ class SetCriterionHOI(nn.Module):
                 'hoi_labels': self.loss_hoi_labels,
                 'obj_labels': self.loss_obj_labels,
                 'sub_obj_boxes': self.loss_sub_obj_boxes,
-                'feats_mimic': self.mimic_loss
+                'feats_mimic': self.mimic_loss,
+                'image_hoi_labels': self.loss_image_hoi_labels,
             }
         else:
             loss_map = {
@@ -432,6 +489,7 @@ class SetCriterionHOI(nn.Module):
         for loss in self.losses:
             losses.update(self.get_loss(loss, outputs, targets, indices, num_interactions))
 
+        losses.update(self.get_loss('image_hoi_labels', outputs, targets, indices, num_interactions))
         # In case of auxiliary losses, we repeat this process with the output of each intermediate layer.
         if 'aux_outputs' in outputs:
             for i, aux_outputs in enumerate(outputs['aux_outputs']):
@@ -523,6 +581,7 @@ def build(args):
     weight_dict['loss_obj_bbox'] = args.bbox_loss_coef
     weight_dict['loss_sub_giou'] = args.giou_loss_coef
     weight_dict['loss_obj_giou'] = args.giou_loss_coef
+    weight_dict['loss_image_hoi_ce'] = args.image_hoi_loss_coef
     if args.with_mimic:
         weight_dict['loss_feat_mimic'] = args.mimic_loss_coef
 
@@ -531,7 +590,7 @@ def build(args):
         for i in range(args.dec_layers - 1):
             aux_weight_dict.update({k + f'_{i}': v for k, v in weight_dict.items()})
         weight_dict.update(aux_weight_dict)
-    losses = ['hoi_labels', 'obj_labels', 'sub_obj_boxes']
+    losses = ['hoi_labels', 'obj_labels', 'sub_obj_boxes', 'image_hoi_labels']
     if args.with_mimic:
         losses.append('feats_mimic')
 
