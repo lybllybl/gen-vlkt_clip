@@ -55,6 +55,7 @@ class GEN_VLKT(nn.Module):
             FeedForwardNetwork(i_hidden_dim, args.dim_feedforward, args.dropout),
             GroupWiseLinear(hoi_num, i_hidden_dim, bias=True),
         )
+        self.all_hoi_embed = nn.Linear(hoi_num, hoi_num)
 
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
         self.obj_logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
@@ -186,8 +187,11 @@ class GEN_VLKT(nn.Module):
         outputs_inter_hs = inter_hs.clone()
         inter_hoi_class = self.hoi_class_embedding(inter_hs)
 
-        outputs_hoi_class = inter_hoi_class + outputs_i_hoi_class.unsqueeze(-2)
-        outputs_hoi_class = outputs_hoi_class / outputs_hoi_class.norm(dim=-1, keepdim=True)
+        cross_hoi_class = self.i_logit_scale * torch.matmul(inter_hs, i_hs.transpose(-2, -1))
+        all_hoi_class = inter_hoi_class + cross_hoi_class
+        all_hoi_class_norm = all_hoi_class / all_hoi_class.norm(dim=-1, keepdim=True)
+        all_hoi_class_mlp = self.all_hoi_embed(all_hoi_class_norm)
+        outputs_hoi_class = all_hoi_class + all_hoi_class_mlp
 
         out = {'pred_hoi_logits': outputs_hoi_class[-1], 'pred_obj_logits': outputs_obj_class[-1],
                'pred_sub_boxes': outputs_sub_coord[-1], 'pred_obj_boxes': outputs_obj_coord[-1],
