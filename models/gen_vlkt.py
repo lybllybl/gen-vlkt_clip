@@ -191,7 +191,8 @@ class GEN_VLKT(nn.Module):
         all_hoi_class = inter_hoi_class + cross_hoi_class
         all_hoi_class_norm = all_hoi_class / all_hoi_class.norm(dim=-1, keepdim=True)
         all_hoi_class_mlp = self.all_hoi_embed(all_hoi_class_norm)
-        outputs_hoi_class = all_hoi_class + all_hoi_class_mlp
+        fused_hoi_class = all_hoi_class + all_hoi_class_mlp
+        outputs_hoi_class = fused_hoi_class / fused_hoi_class.norm(dim=-1, keepdim=True)
 
         out = {'pred_hoi_logits': outputs_hoi_class[-1], 'pred_obj_logits': outputs_obj_class[-1],
                'pred_sub_boxes': outputs_sub_coord[-1], 'pred_obj_boxes': outputs_obj_coord[-1],
