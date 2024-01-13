@@ -63,6 +63,8 @@ def get_args_parser():
                         help="Number of decoding layers in the interaction_decoder")
     parser.add_argument('--i_hidden_dim', default=512, type=int,
                         help="Size of the embeddings (dimension of the interaction_decoder)")
+    parser.add_argument('--image_hoi_loss_type', default='asl', type=str,
+                        help="the loss type of interaction_decoder")
 
     # * Segmentation
     parser.add_argument('--masks', action='store_true',

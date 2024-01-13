@@ -265,6 +265,7 @@ class SetCriterionHOI(nn.Module):
         device = "cuda" if torch.cuda.is_available() else "cpu"
         self.clip_model, _ = clip.load(args.clip_model, device=device)
         self.alpha = args.alpha
+        self.image_hoi_loss_type = args.image_hoi_loss_type
 
     def loss_obj_labels(self, outputs, targets, indices, num_interactions, log=True):
         assert 'pred_obj_logits' in outputs
@@ -377,10 +378,20 @@ class SetCriterionHOI(nn.Module):
 
     def loss_image_hoi_labels(self, outputs, targets, indices, num_interactions):
         src_logits = outputs['pred_image_hoi_logits']
-        target_labels = torch.stack([t['image_hoi_labels'] for t in targets])
+        target_classes = torch.stack([t['image_hoi_labels'] for t in targets])
 
-        src_logits = src_logits.sigmoid()
-        loss_image_verb_ce = self.asymmetric_loss(src_logits, target_labels)
+        if self.image_hoi_loss_type == 'bce':
+            pos_weight = 10. * torch.ones(self.num_verb_classes).to(src_logits.device)
+            loss_image_verb_ce_none = 0.1 * F.binary_cross_entropy_with_logits(src_logits, target_classes,
+                                                                               pos_weight=pos_weight, reduction='none')
+            loss_image_verb_ce = loss_image_verb_ce_none.sum(-1).mean()
+        elif self.image_hoi_loss_type == 'focal':
+            src_logits = src_logits.sigmoid()
+            loss_image_verb_ce = self._neg_loss(src_logits, target_classes)
+        elif self.image_hoi_loss_type == 'asl':
+            src_logits = src_logits.sigmoid()
+            loss_image_verb_ce = self.asymmetric_loss(src_logits, target_classes)
+
         return {'loss_image_hoi_ce': loss_image_verb_ce}
 
     def _neg_loss(self, pred, gt, weights=None, alpha=0.25):
