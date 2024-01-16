@@ -169,30 +169,32 @@ class GEN_VLKT(nn.Module):
         i_hs = i_hs / i_hs.norm(dim=-1, keepdim=True)
         outputs_i_hoi_class = self.i_hoi_proj(i_hs).squeeze(-1)
 
-        # if self.args.with_clip_label:
-        #     logit_scale = self.logit_scale.exp()
-        #     inter_hs = self.hoi_class_fc(inter_hs)
-        #     outputs_inter_hs = inter_hs.clone()
-        #     inter_hs = inter_hs / inter_hs.norm(dim=-1, keepdim=True)
-        #     if self.args.dataset_file == 'hico' and self.args.zero_shot_type != 'default' \
-        #             and (self.args.eval or not is_training):
-        #         outputs_hoi_class = logit_scale * self.eval_visual_projection(inter_hs)
-        #     else:
-        #         outputs_hoi_class = logit_scale * self.visual_projection(inter_hs)
-        # else:
-        #     inter_hs = self.hoi_class_fc(inter_hs)
-        #     outputs_inter_hs = inter_hs.clone()
-        #     outputs_hoi_class = self.hoi_class_embedding(inter_hs)
-        inter_hs = self.hoi_class_fc(inter_hs)
-        outputs_inter_hs = inter_hs.clone()
-        inter_hoi_class = self.hoi_class_embedding(inter_hs)
+        if self.args.with_clip_label:
+            logit_scale = self.logit_scale.exp()
+            inter_hs = self.hoi_class_fc(inter_hs)
+            outputs_inter_hs = inter_hs.clone()
+            inter_hs = inter_hs / inter_hs.norm(dim=-1, keepdim=True)
+            if self.args.dataset_file == 'hico' and self.args.zero_shot_type != 'default' \
+                    and (self.args.eval or not is_training):
+                inter_hoi_class = logit_scale * self.eval_visual_projection(inter_hs)
+            else:
+                inter_hoi_class = logit_scale * self.visual_projection(inter_hs)
+        else:
+            inter_hs = self.hoi_class_fc(inter_hs)
+            outputs_inter_hs = inter_hs.clone()
+            inter_hoi_class = self.hoi_class_embedding(inter_hs)
+        # inter_hs = self.hoi_class_fc(inter_hs)
+        # outputs_inter_hs = inter_hs.clone()
+        # inter_hoi_class = self.hoi_class_embedding(inter_hs)
 
-        cross_hoi_class = self.i_logit_scale * torch.matmul(inter_hs, i_hs.transpose(-2, -1))
+        i_logit_scale = self.i_logit_scale.exp()
+        cross_hoi_class = i_logit_scale * torch.matmul(inter_hs, i_hs.transpose(-2, -1))
         all_hoi_class = inter_hoi_class + cross_hoi_class
         all_hoi_class_norm = all_hoi_class / all_hoi_class.norm(dim=-1, keepdim=True)
         all_hoi_class_mlp = self.all_hoi_embed(all_hoi_class_norm)
-        fused_hoi_class = all_hoi_class + all_hoi_class_mlp
-        outputs_hoi_class = fused_hoi_class / fused_hoi_class.norm(dim=-1, keepdim=True)
+        # fused_hoi_class = all_hoi_class + all_hoi_class_mlp
+        # outputs_hoi_class = fused_hoi_class / fused_hoi_class.norm(dim=-1, keepdim=True)
+        outputs_hoi_class = all_hoi_class_mlp
 
         out = {'pred_hoi_logits': outputs_hoi_class[-1], 'pred_obj_logits': outputs_obj_class[-1],
                'pred_sub_boxes': outputs_sub_coord[-1], 'pred_obj_boxes': outputs_obj_coord[-1],
